@@ -5,7 +5,7 @@ sys.path.append(os.path.normpath(os.path.join(os.path.dirname(__file__), '../lib
 import init
 import config
 import misc
-from dashd import DashDaemon
+from sparksd import SparksDaemon
 from models import Superblock, Proposal, GovernanceObject, Watchdog
 from models import VoteSignals, VoteOutcomes, Transient
 import socket
@@ -19,22 +19,22 @@ from scheduler import Scheduler
 import argparse
 
 
-# sync dashd gobject list with our local relational DB backend
-def perform_dashd_object_sync(dashd):
-    GovernanceObject.sync(dashd)
+# sync sparksd gobject list with our local relational DB backend
+def perform_sparksd_object_sync(sparksd):
+    GovernanceObject.sync(sparksd)
 
 
 # delete old watchdog objects, create new when necessary
-def watchdog_check(dashd):
+def watchdog_check(sparksd):
     printdbg("in watchdog_check")
 
     # delete expired watchdogs
-    for wd in Watchdog.expired(dashd):
+    for wd in Watchdog.expired(sparksd):
         printdbg("\tFound expired watchdog [%s], voting to delete" % wd.object_hash)
-        wd.vote(dashd, VoteSignals.delete, VoteOutcomes.yes)
+        wd.vote(sparksd, VoteSignals.delete, VoteOutcomes.yes)
 
     # now, get all the active ones...
-    active_wd = Watchdog.active(dashd)
+    active_wd = Watchdog.active(sparksd)
     active_count = active_wd.count()
 
     # none exist, submit a new one to the network
@@ -42,7 +42,7 @@ def watchdog_check(dashd):
         # create/submit one
         printdbg("\tNo watchdogs exist... submitting new one.")
         wd = Watchdog(created_at=int(time.time()))
-        wd.submit(dashd)
+        wd.submit(sparksd)
 
     else:
         wd_list = sorted(active_wd, key=lambda wd: wd.object_hash)
@@ -50,35 +50,35 @@ def watchdog_check(dashd):
         # highest hash wins
         winner = wd_list.pop()
         printdbg("\tFound winning watchdog [%s], voting VALID" % winner.object_hash)
-        winner.vote(dashd, VoteSignals.valid, VoteOutcomes.yes)
+        winner.vote(sparksd, VoteSignals.valid, VoteOutcomes.yes)
 
         # if remaining Watchdogs exist in the list, vote delete
         for wd in wd_list:
             printdbg("\tFound losing watchdog [%s], voting DELETE" % wd.object_hash)
-            wd.vote(dashd, VoteSignals.delete, VoteOutcomes.yes)
+            wd.vote(sparksd, VoteSignals.delete, VoteOutcomes.yes)
 
     printdbg("leaving watchdog_check")
 
 
-def prune_expired_proposals(dashd):
+def prune_expired_proposals(sparksd):
     # vote delete for old proposals
-    for proposal in Proposal.expired(dashd.superblockcycle()):
-        proposal.vote(dashd, VoteSignals.delete, VoteOutcomes.yes)
+    for proposal in Proposal.expired(sparksd.superblockcycle()):
+        proposal.vote(sparksd, VoteSignals.delete, VoteOutcomes.yes)
 
 
-# ping dashd
-def sentinel_ping(dashd):
+# ping sparksd
+def sentinel_ping(sparksd):
     printdbg("in sentinel_ping")
 
-    dashd.ping()
+    sparksd.ping()
 
     printdbg("leaving sentinel_ping")
 
 
-def attempt_superblock_creation(dashd):
-    import dashlib
+def attempt_superblock_creation(sparksd):
+    import sparkslib
 
-    if not dashd.is_masternode():
+    if not sparksd.is_masternode():
         print("We are not a Masternode... can't submit superblocks!")
         return
 
@@ -89,7 +89,7 @@ def attempt_superblock_creation(dashd):
     # has this masternode voted on *any* superblocks at the given event_block_height?
     # have we voted FUNDING=YES for a superblock for this specific event_block_height?
 
-    event_block_height = dashd.next_superblock_height()
+    event_block_height = sparksd.next_superblock_height()
 
     if Superblock.is_voted_funding(event_block_height):
         # printdbg("ALREADY VOTED! 'til next time!")
@@ -97,20 +97,20 @@ def attempt_superblock_creation(dashd):
         # vote down any new SBs because we've already chosen a winner
         for sb in Superblock.at_height(event_block_height):
             if not sb.voted_on(signal=VoteSignals.funding):
-                sb.vote(dashd, VoteSignals.funding, VoteOutcomes.no)
+                sb.vote(sparksd, VoteSignals.funding, VoteOutcomes.no)
 
         # now return, we're done
         return
 
-    if not dashd.is_govobj_maturity_phase():
+    if not sparksd.is_govobj_maturity_phase():
         printdbg("Not in maturity phase yet -- will not attempt Superblock")
         return
 
-    proposals = Proposal.approved_and_ranked(proposal_quorum=dashd.governance_quorum(), next_superblock_max_budget=dashd.next_superblock_max_budget())
-    budget_max = dashd.get_superblock_budget_allocation(event_block_height)
-    sb_epoch_time = dashd.block_height_to_epoch(event_block_height)
+    proposals = Proposal.approved_and_ranked(proposal_quorum=sparksd.governance_quorum(), next_superblock_max_budget=sparksd.next_superblock_max_budget())
+    budget_max = sparksd.get_superblock_budget_allocation(event_block_height)
+    sb_epoch_time = sparksd.block_height_to_epoch(event_block_height)
 
-    sb = dashlib.create_superblock(proposals, event_block_height, budget_max, sb_epoch_time)
+    sb = sparkslib.create_superblock(proposals, event_block_height, budget_max, sb_epoch_time)
     if not sb:
         printdbg("No superblock created, sorry. Returning.")
         return
@@ -118,12 +118,12 @@ def attempt_superblock_creation(dashd):
     # find the deterministic SB w/highest object_hash in the DB
     dbrec = Superblock.find_highest_deterministic(sb.hex_hash())
     if dbrec:
-        dbrec.vote(dashd, VoteSignals.funding, VoteOutcomes.yes)
+        dbrec.vote(sparksd, VoteSignals.funding, VoteOutcomes.yes)
 
         # any other blocks which match the sb_hash are duplicates, delete them
         for sb in Superblock.select().where(Superblock.sb_hash == sb.hex_hash()):
             if not sb.voted_on(signal=VoteSignals.funding):
-                sb.vote(dashd, VoteSignals.delete, VoteOutcomes.yes)
+                sb.vote(sparksd, VoteSignals.delete, VoteOutcomes.yes)
 
         printdbg("VOTED FUNDING FOR SB! We're done here 'til next superblock cycle.")
         return
@@ -131,24 +131,24 @@ def attempt_superblock_creation(dashd):
         printdbg("The correct superblock wasn't found on the network...")
 
     # if we are the elected masternode...
-    if (dashd.we_are_the_winner()):
+    if (sparksd.we_are_the_winner()):
         printdbg("we are the winner! Submit SB to network")
-        sb.submit(dashd)
+        sb.submit(sparksd)
 
 
-def check_object_validity(dashd):
+def check_object_validity(sparksd):
     # vote (in)valid objects
     for gov_class in [Proposal, Superblock]:
         for obj in gov_class.select():
-            obj.vote_validity(dashd)
+            obj.vote_validity(sparksd)
 
 
-def is_dashd_port_open(dashd):
+def is_sparksd_port_open(sparksd):
     # test socket open before beginning, display instructive message to MN
     # operators if it's not
     port_open = False
     try:
-        info = dashd.rpc_command('getgovernanceinfo')
+        info = sparksd.rpc_command('getgovernanceinfo')
         port_open = True
     except (socket.error, JSONRPCException) as e:
         print("%s" % e)
@@ -157,21 +157,21 @@ def is_dashd_port_open(dashd):
 
 
 def main():
-    dashd = DashDaemon.from_dash_conf(config.dash_conf)
+    sparksd = SparksDaemon.from_sparks_conf(config.sparks_conf)
     options = process_args()
 
-    # check dashd connectivity
-    if not is_dashd_port_open(dashd):
-        print("Cannot connect to dashd. Please ensure dashd is running and the JSONRPC port is open to Sentinel.")
+    # check sparksd connectivity
+    if not is_sparksd_port_open(sparksd):
+        print("Cannot connect to sparksd. Please ensure sparksd is running and the JSONRPC port is open to Sentinel.")
         return
 
-    # check dashd sync
-    if not dashd.is_synced():
-        print("dashd not synced with network! Awaiting full sync before running Sentinel.")
+    # check sparksd sync
+    if not sparksd.is_synced():
+        print("sparksd not synced with network! Awaiting full sync before running Sentinel.")
         return
 
     # ensure valid masternode
-    if not dashd.is_masternode():
+    if not sparksd.is_masternode():
         print("Invalid Masternode Status, cannot continue.")
         return
 
@@ -203,22 +203,22 @@ def main():
     # ========================================================================
     #
     # load "gobject list" rpc command data, sync objects into internal database
-    perform_dashd_object_sync(dashd)
+    perform_sparksd_object_sync(sparksd)
 
-    if dashd.has_sentinel_ping:
-        sentinel_ping(dashd)
+    if sparksd.has_sentinel_ping:
+        sentinel_ping(sparksd)
     else:
         # delete old watchdog objects, create a new if necessary
-        watchdog_check(dashd)
+        watchdog_check(sparksd)
 
     # auto vote network objects as valid/invalid
-    # check_object_validity(dashd)
+    # check_object_validity(sparksd)
 
     # vote to delete expired proposals
-    prune_expired_proposals(dashd)
+    prune_expired_proposals(sparksd)
 
     # create a Superblock if necessary
-    attempt_superblock_creation(dashd)
+    attempt_superblock_creation(sparksd)
 
     # schedule the next run
     Scheduler.schedule_next_run()
