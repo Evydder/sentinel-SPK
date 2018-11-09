@@ -17,7 +17,7 @@ min_sparksd_proto_version_with_sentinel_ping = 70207
 def get_sparks_conf():
     home = os.environ.get('HOME')
 
-    sparks_conf = os.path.join(home, ".sparkscore/sparks.conf")
+    sparks_conf = os.path.join(home, "/sparks.conf")
     if sys.platform == 'darwin':
         sparks_conf = os.path.join(home, "Library/Application Support/SparksCore/sparks.conf")
 
